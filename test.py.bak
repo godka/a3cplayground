@@ -24,7 +24,7 @@ def main():
         saver = tf.train.Saver()
         saver.restore(sess, NN_MODEL)
     
-        for eps in range(100):
+        for eps in xrange(100):
             obs = env.reset()
             reward = 0
             for _ in range(300):
@@ -39,7 +39,7 @@ def main():
                 reward += rew
                 if done:
                     break
-            print(eps, reward, done)
+            print eps, reward, done
 
 
 if __name__ == '__main__':

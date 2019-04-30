@@ -1,29 +1,29 @@
-import os
-os.environ['CUDA_VISIBLE_DEVICES']='3'
-import logging
-import numpy as np
-import multiprocessing as mp
-import tensorflow as tf
+import a3c_auto as a3c
 import gym
-import a3c
+import tensorflow as tf
+import multiprocessing as mp
+import numpy as np
+import logging
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 
 S_DIM = 4
 A_DIM = 2
-ACTOR_LR_RATE = 0.0001
-CRITIC_LR_RATE = 0.001
-NUM_AGENTS = 2
+ACTOR_LR_RATE = 1e-4
+CRITIC_LR_RATE = 1e-3
+NUM_AGENTS = 4
 TRAIN_SEQ_LEN = 500  # take as a train batch
-TRAIN_EPOCH = 10000
+TRAIN_EPOCH = 1000
 MODEL_SAVE_INTERVAL = 100
 RANDOM_SEED = 42
 RAND_RANGE = 1000
-SUMMARY_DIR = './results/8/'
+SUMMARY_DIR = './results/1'
 MODEL_DIR = './models'
 TRAIN_TRACES = './cooked_traces/'
 # NN_MODEL = './results/nn_model_ep_10800.ckpt'
 NN_MODEL = None
-RATE = 0.2
+
 
 def central_agent(net_params_queues, exp_queues):
 
@@ -32,14 +32,16 @@ def central_agent(net_params_queues, exp_queues):
 
     with tf.Session() as sess, open(SUMMARY_DIR + '/log_central', 'w') as log_file:
 
-        actor = a3c.ActorNetwork(sess, state_dim=S_DIM, action_dim=A_DIM, learning_rate=ACTOR_LR_RATE)
-        critic = a3c.CriticNetwork(sess, state_dim=S_DIM, learning_rate=CRITIC_LR_RATE)
-        replay = a3c.RelayBuffer(10000)
+        actor = a3c.ActorNetwork(
+            sess, state_dim=S_DIM, action_dim=A_DIM, learning_rate=ACTOR_LR_RATE)
+        critic = a3c.CriticNetwork(
+            sess, state_dim=S_DIM, learning_rate=CRITIC_LR_RATE)
 
         summary_ops, summary_vars = a3c.build_summaries()
 
         sess.run(tf.global_variables_initializer())
-        writer = tf.summary.FileWriter(SUMMARY_DIR, sess.graph)  # training monitor
+        writer = tf.summary.FileWriter(
+            SUMMARY_DIR, sess.graph)  # training monitor
         saver = tf.train.Saver()  # save neural net parameters
 
         # restore neural net parameters
@@ -47,86 +49,50 @@ def central_agent(net_params_queues, exp_queues):
         if nn_model is not None:  # nn_model is the path to file
             saver.restore(sess, nn_model)
             print("Model restored.")
-
+        last_reward = None
         # while True:  # assemble experiences from agents, compute the gradients
-        for ep in range(TRAIN_EPOCH): 
+        for ep in range(TRAIN_EPOCH):
             # synchronize the network parameters of work agent
             actor_net_params = actor.get_network_params()
             critic_net_params = critic.get_network_params()
             for i in range(NUM_AGENTS):
-                # if ep > 0:
-                #     if np.random.random() > RATE:
-                #         net_params_queues[i].put([actor_net_params, critic_net_params])
-                #     else:
-                #         # not update some part of agents
-                #         net_params_queues[i].put([None, None])
-                # else:
-                #     # update params in the first time
                 net_params_queues[i].put([actor_net_params, critic_net_params])
-
 
             # record average reward and td loss change
             # in the experiences from the agents
             total_batch_len = 0.0
             total_reward = 0.0
             total_td_loss = 0.0
-            total_agents = 0.0 
-            total_td_batch_len = 0.0
-
-            # assemble experiences from the agents
-            actor_gradient_batch = []
-            critic_gradient_batch = []
+            total_agents = 0.0
 
             for i in range(NUM_AGENTS):
-                s_batch, a_batch, r_batch, terminal, m_a_batch = exp_queues[i].get()
-
-                replay.push(s_batch, a_batch, r_batch, terminal, m_a_batch)
-                # online policy
-                actor_gradient, critic_gradient, td_batch = \
-                    a3c.compute_gradients(
-                        s_batch=np.vstack(s_batch),
-                        a_batch=np.vstack(a_batch),
-                        r_batch=np.vstack(r_batch),
-                        terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
-
-                actor_gradient_batch.append(actor_gradient)
-                critic_gradient_batch.append(critic_gradient)
+                s_batch, a_batch, r_batch, terminal = exp_queues[i].get()
+                s_batch = np.vstack(s_batch)
+                a_batch = np.vstack(a_batch)
+                r_batch = np.vstack(r_batch)
+                R_batch, td_batch = a3c.compute_td(
+                    s_batch, a_batch, r_batch, terminal, critic)
 
                 total_reward += np.sum(r_batch)
-                #total_td_loss += np.sum(0.)
+                total_td_loss += np.sum(td_batch)
                 total_batch_len += len(r_batch)
                 total_agents += 1.0
 
-            # compute aggregated gradient
-            #assert NUM_AGENTS == len(actor_gradient_batch)
-            #assert len(actor_gradient_batch) == len(critic_gradient_batch)
-
-            for i in range(len(actor_gradient_batch)):
-                actor.apply_gradients(actor_gradient_batch[i])
-                critic.apply_gradients(critic_gradient_batch[i])
-
-            # offline training
-            for p in range(NUM_AGENTS * 10):
-                s_batch, a_batch, r_batch, terminal, m_a_batch = replay.pull()
-                actor_gradient, critic_gradient, td_batch = \
-                    a3c.compute_gradients(
-                        s_batch=np.vstack(s_batch),
-                        a_batch=np.vstack(a_batch),
-                        r_batch=np.vstack(r_batch),
-                        terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
-                actor.apply_gradients(actor_gradient)
-                critic.apply_gradients(critic_gradient)
-
-                total_td_loss += np.sum(td_batch)
-                total_td_batch_len += len(r_batch)
+            actor.train(s_batch, a_batch, td_batch)
+            critic.train(s_batch, R_batch)
 
             # log training information
-            avg_reward = total_reward  / total_agents
-            avg_td_loss = total_td_loss / total_td_batch_len
+            avg_reward = total_reward / total_agents
+            avg_td_loss = total_td_loss / total_batch_len
+            if last_reward is None:
+                last_reward = avg_reward
+
+            actor.auto_learn.update(avg_reward - last_reward)
+            critic.auto_learn.update(avg_reward - last_reward)
 
             log_file.write('Epoch: ' + str(ep) +
-                         ' TD_loss: ' + str(avg_td_loss) +
-                         ' Avg_reward: ' + str(avg_reward) + '\n')
+                           ' TD_loss: ' + str(avg_td_loss) +
+                           ' Avg_reward: ' + str(avg_reward) + '\n')
             log_file.flush()
 
             summary_str = sess.run(summary_ops, feed_dict={
@@ -147,7 +113,7 @@ def agent(agent_id, net_params_queue, exp_queue):
 
     env = gym.make("CartPole-v0")
     env.force_mag = 100.0
-
+    env.seed(RANDOM_SEED)
     with tf.Session() as sess, open(SUMMARY_DIR + '/log_agent_' + str(agent_id), 'w') as log_file:
         actor = a3c.ActorNetwork(sess,
                                  state_dim=S_DIM, action_dim=A_DIM,
@@ -158,20 +124,16 @@ def agent(agent_id, net_params_queue, exp_queue):
 
         # initial synchronization of the network parameters from the coordinator
         actor_net_params, critic_net_params = net_params_queue.get()
-
-        # check if the agent is the negelect update agent
-        if actor_net_params is not None:
-            actor.set_network_params(actor_net_params)
-            critic.set_network_params(critic_net_params)
+        actor.set_network_params(actor_net_params)
+        critic.set_network_params(critic_net_params)
 
         time_stamp = 0
-        for ep in range(TRAIN_EPOCH): 
+        for ep in range(TRAIN_EPOCH):
 
             obs = env.reset()
 
             s_batch = []
             a_batch = []
-            m_a_batch = []
             r_batch = []
 
             for step in range(TRAIN_SEQ_LEN):
@@ -180,12 +142,12 @@ def agent(agent_id, net_params_queue, exp_queue):
 
                 action_prob = actor.predict(np.reshape(obs, (1, S_DIM)))
                 action_cumsum = np.cumsum(action_prob)
-                a = (action_cumsum > np.random.randint(1, RAND_RANGE) / float(RAND_RANGE)).argmax()
+                a = (action_cumsum > np.random.randint(
+                    1, RAND_RANGE) / float(RAND_RANGE)).argmax()
 
                 action_vec = np.zeros(A_DIM)
                 action_vec[a] = 1
                 a_batch.append(action_vec)
-                m_a_batch.append(action_prob[0])
 
                 obs, rew, done, info = env.step(a)
 
@@ -194,16 +156,14 @@ def agent(agent_id, net_params_queue, exp_queue):
                 if done:
                     break
 
-            exp_queue.put([s_batch, a_batch, r_batch, done, m_a_batch])
+            exp_queue.put([s_batch, a_batch, r_batch, done])
 
             actor_net_params, critic_net_params = net_params_queue.get()
-            
-            # check if the agent is the negelect update agent
-            if actor_net_params is not None:
-                actor.set_network_params(actor_net_params)
-                critic.set_network_params(critic_net_params)
+            actor.set_network_params(actor_net_params)
+            critic.set_network_params(critic_net_params)
 
-            log_file.write('epoch' + str(ep) + 'reward' + str(np.sum(rew)) + 'step' + str(len(r_batch)))
+            log_file.write('epoch' + str(ep) + 'reward' +
+                           str(np.sum(rew)) + 'step' + str(len(r_batch)))
             log_file.flush()
 
 
@@ -238,7 +198,4 @@ def main():
 
 
 if __name__ == '__main__':
-    #os.system('mkdir ' + SUMMARY_DIR)
-    if not os.path.exists(SUMMARY_DIR):
-        os.makedirs(SUMMARY_DIR)
     main()
