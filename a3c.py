@@ -3,7 +3,6 @@ import tensorflow as tf
 import tensorflow.contrib.layers as tl
 import time
 
-
 GAMMA = 0.99
 ENTROPY_WEIGHT = 0.1
 ENTROPY_EPS = 1e-6
@@ -16,7 +15,7 @@ class RelayBuffer(object):
         self.buffer = []
 
     def push(self, s, a, r, t, m_a):
-        #for _s, _a, _r, _m_a in zip(s, a, r, m_a):
+        # for _s, _a, _r, _m_a in zip(s, a, r, m_a):
         if len(self.buffer) == self.max_num:
             rnd_pop = np.random.randint(self.max_num)
             self.buffer.pop(rnd_pop)
@@ -63,8 +62,9 @@ class ActorNetwork(object):
         self.acts = tf.placeholder(tf.float32, [None, self.a_dim])
         # stop gradient now
         self.mu_acts = tf.placeholder(tf.float32, [None, self.a_dim])
+        self.real_out = tf.clip_by_value(self.out, 1e-4, 1.)
         self.mu_weight = tf.stop_gradient(tf.clip_by_value(tf.reduce_sum(tf.multiply(
-            self.acts, self.out / self.mu_acts), reduction_indices=1, keep_dims=True), 0., 1.))
+            self.acts, self.real_out / self.mu_acts), reduction_indices=1, keep_dims=True), 0., 1.))
         #tf.placeholder(tf.float32, [None, 1])
 
         # This gradient will be provided by the critic network
@@ -80,11 +80,11 @@ class ActorNetwork(object):
         # Compute the objective (log action_vector and entropy)
         self.obj = tf.reduce_sum(
             tf.multiply(
-                self.mu_weight * tf.log(tf.reduce_sum(tf.multiply(self.out, self.acts),
-                                                 reduction_indices=1, keep_dims=True)),
-                            -self.act_grad_weights)) \
-            + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.out,
-                                                         tf.log(self.out + ENTROPY_EPS)))
+                self.mu_weight * tf.log(tf.reduce_sum(tf.multiply(self.real_out, self.acts),
+                                                      reduction_indices=1, keep_dims=True)),
+                -self.act_grad_weights)) \
+            + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.real_out,
+                                                         tf.log(self.real_out + ENTROPY_EPS)))
 
         # Combine the gradients here
         self.actor_gradients = tf.gradients(self.obj, self.network_params)
@@ -112,7 +112,7 @@ class ActorNetwork(object):
         })
 
     def predict(self, inputs):
-        return self.sess.run(self.out, feed_dict={
+        return self.sess.run(self.real_out, feed_dict={
             self.inputs: inputs
         })
 
@@ -251,23 +251,36 @@ def compute_gradients(s_batch, a_batch, r_batch, terminal, actor, critic, mu_a_b
     v_batch = critic.predict(s_batch)
     probe_batch = actor.predict(s_batch)
     R_batch = np.zeros(r_batch.shape)
+    V_batch = np.zeros(r_batch.shape)
 
+    clipped_rhos = []
+    for i in range(ba_size):
+        a = np.argmax(a_batch[i])
+        clipped_rhos.append(
+            np.clip(probe_batch[i][a] / mu_a_batch[i][a], 0., 1.))
+
+    # clipped_rhos = tf.minimum(clip_rho_threshold, rhos, name='clipped_rhos')
     if terminal:
         R_batch[-1, 0] = 0  # terminal state
     else:
         R_batch[-1, 0] = v_batch[-1, 0]  # boot strap from last state
-    
+
     for t in reversed(range(ba_size - 1)):
         R_batch[t, 0] = r_batch[t] + GAMMA * R_batch[t + 1, 0]
 
     td_batch = R_batch - v_batch
-    for i in range(len(td_batch)):
-        a = np.argmax(a_batch[i])
-        td_batch[i] *= np.clip(probe_batch[i][a] / mu_a_batch[i][a], 0., 1.)
+    # impala
+    for t in reversed(range(ba_size - 1)):
+        V_batch[t, 0] = R_batch[t] + td_batch[t] + GAMMA * \
+            clipped_rhos[t] * (V_batch[t+1] - R_batch[t+1])
+        # td_batch[t]
+    # for i in range(len(td_batch)):
+    #     a = np.argmax(a_batch[i])
+    #     td_batch[i] *= np.clip(probe_batch[i][a] / mu_a_batch[i][a], 0., 1.)
 
     actor_gradients = actor.get_gradients(
         s_batch, a_batch, td_batch, mu_a_batch)
-    critic_gradients = critic.get_gradients(s_batch, R_batch)
+    critic_gradients = critic.get_gradients(s_batch, V_batch)
 
     return actor_gradients, critic_gradients, td_batch
 
