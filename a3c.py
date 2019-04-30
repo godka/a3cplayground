@@ -93,6 +93,8 @@ class ActorNetwork(object):
         self.optimize = tf.train.RMSPropOptimizer(self.lr_rate).\
             apply_gradients(zip(self.actor_gradients, self.network_params))
 
+        self.opt = tf.train.RMSPropOptimizer(self.lr_rate).minimize(self.obj)
+
     def create_actor_network(self):
         with tf.variable_scope('actor'):
             hid_1 = tl.fully_connected(
@@ -126,6 +128,22 @@ class ActorNetwork(object):
         # #     self.acts: acts,
         # # }))
         return self.sess.run(self.actor_gradients, feed_dict={
+            self.inputs: inputs,
+            self.mu_acts: mu_acts,
+            self.acts: acts,
+            self.act_grad_weights: act_grad_weights
+        })
+
+    def train_v2(self, inputs, acts, act_grad_weights, mu_acts):
+        # _acts = self.predict(inputs)
+        # # _mu_weight = self.acts * _acts / mu_acts
+        # print(mu_acts, _acts, acts)
+        # # print(self.sess.run(self.mu_weight, feed_dict={
+        # #     self.inputs: inputs,
+        # #     self.mu_acts: mu_acts,
+        # #     self.acts: acts,
+        # # }))
+        return self.sess.run(self.opt, feed_dict={
             self.inputs: inputs,
             self.mu_acts: mu_acts,
             self.acts: acts,
@@ -191,6 +209,8 @@ class CriticNetwork(object):
         self.optimize = tf.train.RMSPropOptimizer(self.lr_rate).\
             apply_gradients(zip(self.critic_gradients, self.network_params))
 
+        self.opt = tf.train.RMSPropOptimizer(self.lr_rate).minimize(self.loss)
+
     def create_critic_network(self):
         with tf.variable_scope('critic'):
             hid_1 = tl.fully_connected(
@@ -224,6 +244,12 @@ class CriticNetwork(object):
             self.td_target: td_target
         })
 
+    def train_v2(self, inputs, td_target):
+        return self.sess.run(self.opt, feed_dict={
+            self.inputs: inputs,
+            self.td_target: td_target
+        })
+
     def apply_gradients(self, critic_gradients):
         return self.sess.run(self.optimize, feed_dict={
             i: d for i, d in zip(self.critic_gradients, critic_gradients)
@@ -237,6 +263,50 @@ class CriticNetwork(object):
             i: d for i, d in zip(self.input_network_params, input_network_params)
         })
 
+def train_v2(s_batch, a_batch, r_batch, terminal, actor, critic, mu_a_batch=None):
+    """
+    batch of s, a, r is from samples in a sequence
+    the format is in np.array([batch_size, s/a/r_dim])
+    terminal is True when sequence ends as a terminal state
+    """
+    assert s_batch.shape[0] == a_batch.shape[0]
+    assert s_batch.shape[0] == r_batch.shape[0]
+    ba_size = s_batch.shape[0]
+
+    v_batch = critic.predict(s_batch)
+    probe_batch = actor.predict(s_batch)
+    R_batch = np.zeros(r_batch.shape)
+    V_batch = np.zeros(r_batch.shape)
+    # impala
+    clipped_rhos = []
+    for i in range(ba_size):
+        a = np.argmax(a_batch[i])
+        clipped_rhos.append(
+            np.clip(probe_batch[i][a] / mu_a_batch[i][a], 0., 1.))
+
+    # clipped_rhos = tf.minimum(clip_rho_threshold, rhos, name='clipped_rhos')
+    if terminal:
+        R_batch[-1, 0] = 0  # terminal state
+    else:
+        R_batch[-1, 0] = v_batch[-1, 0]  # boot strap from last state
+
+    for t in reversed(range(ba_size - 1)):
+        R_batch[t, 0] = r_batch[t] + GAMMA * R_batch[t + 1, 0]
+
+    td_batch = R_batch - v_batch
+    # impala
+    for t in reversed(range(ba_size - 1)):
+        V_batch[t, 0] = R_batch[t] + td_batch[t] + GAMMA * \
+            clipped_rhos[t] * (V_batch[t+1] - R_batch[t+1])
+        # td_batch[t]
+    # for i in range(len(td_batch)):
+    #     a = np.argmax(a_batch[i])
+    #     td_batch[i] *= np.clip(probe_batch[i][a] / mu_a_batch[i][a], 0., 1.)
+
+    actor.train_v2(
+        s_batch, a_batch, td_batch, mu_a_batch)
+    critic.train_v2(s_batch, V_batch)
+    return td_batch
 
 def compute_gradients(s_batch, a_batch, r_batch, terminal, actor, critic, mu_a_batch=None):
     """
@@ -252,7 +322,7 @@ def compute_gradients(s_batch, a_batch, r_batch, terminal, actor, critic, mu_a_b
     probe_batch = actor.predict(s_batch)
     R_batch = np.zeros(r_batch.shape)
     V_batch = np.zeros(r_batch.shape)
-
+    # impala
     clipped_rhos = []
     for i in range(ba_size):
         a = np.argmax(a_batch[i])

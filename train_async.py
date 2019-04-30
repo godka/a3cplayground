@@ -48,94 +48,99 @@ def central_agent(net_params_queues, exp_queues):
             saver.restore(sess, nn_model)
             print("Model restored.")
 
-        # synchronize the network parameters of work agent
-        actor_net_params = actor.get_network_params()
-        critic_net_params = critic.get_network_params()
-        for i in range(NUM_AGENTS):
-            net_params_queues[i].put([actor_net_params, critic_net_params])
-            
         # while True:  # assemble experiences from agents, compute the gradients
         for ep in range(TRAIN_EPOCH): 
+            # synchronize the network parameters of work agent
+            actor_net_params = actor.get_network_params()
+            critic_net_params = critic.get_network_params()
+            for i in range(NUM_AGENTS):
+                # if ep > 0:
+                #     if np.random.random() > RATE:
+                #         net_params_queues[i].put([actor_net_params, critic_net_params])
+                #     else:
+                #         # not update some part of agents
+                #         net_params_queues[i].put([None, None])
+                # else:
+                #     # update params in the first time
+                net_params_queues[i].put([actor_net_params, critic_net_params])
+
+
             # record average reward and td loss change
             # in the experiences from the agents
             total_batch_len = 0.0
             total_reward = 0.0
             total_td_loss = 0.0
             total_agents = 0.0 
-            # total_td_batch_len = 0.0
+            total_td_batch_len = 0.0
 
             # assemble experiences from the agents
             actor_gradient_batch = []
             critic_gradient_batch = []
-            agent_batch = []
+
             for i in range(NUM_AGENTS):
-                if exp_queues[i].empty():
-                    continue
-                agent_batch.append(i)
                 s_batch, a_batch, r_batch, terminal, m_a_batch = exp_queues[i].get()
 
                 replay.push(s_batch, a_batch, r_batch, terminal, m_a_batch)
                 # online policy
-                # actor_gradient, critic_gradient, td_batch = \
-                #     a3c.compute_gradients(
-                #         s_batch=np.vstack(s_batch),
-                #         a_batch=np.vstack(a_batch),
-                #         r_batch=np.vstack(r_batch),
-                #         terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
+                actor_gradient, critic_gradient, td_batch = \
+                    a3c.compute_gradients(
+                        s_batch=np.vstack(s_batch),
+                        a_batch=np.vstack(a_batch),
+                        r_batch=np.vstack(r_batch),
+                        terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
 
-                # actor_gradient_batch.append(actor_gradient)
-                # critic_gradient_batch.append(critic_gradient)
+                actor_gradient_batch.append(actor_gradient)
+                critic_gradient_batch.append(critic_gradient)
 
-                # off-policy
-                for t in range(10):
-                    s_batch, a_batch, r_batch, terminal, m_a_batch = replay.pull()
-                    actor_gradient, critic_gradient, td_batch = \
-                        a3c.compute_gradients(
-                            s_batch=np.vstack(s_batch),
-                            a_batch=np.vstack(a_batch),
-                            r_batch=np.vstack(r_batch),
-                            terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
-                    
-                    total_reward += np.sum(r_batch)
-                    total_td_loss += np.sum(td_batch)
-                    total_batch_len += len(r_batch)
-                    total_agents += 1.0
-                    
-                    actor_gradient_batch.append(actor_gradient)
-                    critic_gradient_batch.append(critic_gradient)
+                total_reward += np.sum(r_batch)
+                #total_td_loss += np.sum(0.)
+                total_batch_len += len(r_batch)
+                total_agents += 1.0
 
             # compute aggregated gradient
-            for i in range(len(actor_gradient_batch)):
-                actor.apply_gradients(actor_gradient_batch[i])
-                critic.apply_gradients(critic_gradient_batch[i])
+            #assert NUM_AGENTS == len(actor_gradient_batch)
+            #assert len(actor_gradient_batch) == len(critic_gradient_batch)
 
-            # synchronize the network parameters of work agent
-            actor_net_params = actor.get_network_params()
-            critic_net_params = critic.get_network_params()
-            for i in agent_batch:
-                net_params_queues[i].put([actor_net_params, critic_net_params])
+            # for i in range(len(actor_gradient_batch)):
+            #     actor.apply_gradients(actor_gradient_batch[i])
+            #     critic.apply_gradients(critic_gradient_batch[i])
+
+            # offline training
+            for p in range(NUM_AGENTS * 10):
+                s_batch, a_batch, r_batch, terminal, m_a_batch = replay.pull()
+                actor_gradient, critic_gradient, td_batch = \
+                    a3c.compute_gradients(
+                        s_batch=np.vstack(s_batch),
+                        a_batch=np.vstack(a_batch),
+                        r_batch=np.vstack(r_batch),
+                        terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
+                actor.apply_gradients(actor_gradient)
+                critic.apply_gradients(critic_gradient)
+
+                total_td_loss += np.sum(td_batch)
+                total_td_batch_len += len(r_batch)
+
             # log training information
-            if total_agents > 0:
-                avg_reward = total_reward  / total_agents
-                avg_td_loss = total_td_loss / total_agents
+            avg_reward = total_reward  / total_agents
+            avg_td_loss = total_td_loss / total_td_batch_len
 
-                log_file.write('Epoch: ' + str(ep) +
-                            ' TD_loss: ' + str(avg_td_loss) +
-                            ' Avg_reward: ' + str(avg_reward) + '\n')
-                log_file.flush()
+            log_file.write('Epoch: ' + str(ep) +
+                         ' TD_loss: ' + str(avg_td_loss) +
+                         ' Avg_reward: ' + str(avg_reward) + '\n')
+            log_file.flush()
 
-                summary_str = sess.run(summary_ops, feed_dict={
-                    summary_vars[0]: avg_td_loss,
-                    summary_vars[1]: avg_reward
-                })
+            summary_str = sess.run(summary_ops, feed_dict={
+                summary_vars[0]: avg_td_loss,
+                summary_vars[1]: avg_reward
+            })
 
-                writer.add_summary(summary_str, ep)
-                writer.flush()
+            writer.add_summary(summary_str, ep)
+            writer.flush()
 
-                if ep % MODEL_SAVE_INTERVAL == 0:
-                    # Save the neural net parameters to disk.
-                    save_path = saver.save(sess, MODEL_DIR + "/nn_model_ep_" +
-                                        str(ep) + ".ckpt")
+            if ep % MODEL_SAVE_INTERVAL == 0:
+                # Save the neural net parameters to disk.
+                save_path = saver.save(sess, MODEL_DIR + "/nn_model_ep_" +
+                                       str(ep) + ".ckpt")
 
 
 def agent(agent_id, net_params_queue, exp_queue):

@@ -18,7 +18,7 @@ TRAIN_EPOCH = 10000
 MODEL_SAVE_INTERVAL = 100
 RANDOM_SEED = 42
 RAND_RANGE = 1000
-SUMMARY_DIR = './results/10/'
+SUMMARY_DIR = './results/11/'
 MODEL_DIR = './models'
 TRAIN_TRACES = './cooked_traces/'
 # NN_MODEL = './results/nn_model_ep_10800.ckpt'
@@ -82,15 +82,15 @@ def central_agent(net_params_queues, exp_queues):
 
                 replay.push(s_batch, a_batch, r_batch, terminal, m_a_batch)
                 # online policy
-                actor_gradient, critic_gradient, td_batch = \
-                    a3c.compute_gradients(
-                        s_batch=np.vstack(s_batch),
-                        a_batch=np.vstack(a_batch),
-                        r_batch=np.vstack(r_batch),
-                        terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
+                #actor_gradient, critic_gradient, td_batch = \
+                td_batch = a3c.train_v2(
+                    s_batch=np.vstack(s_batch),
+                    a_batch=np.vstack(a_batch),
+                    r_batch=np.vstack(r_batch),
+                    terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
 
-                actor_gradient_batch.append(actor_gradient)
-                critic_gradient_batch.append(critic_gradient)
+                #actor_gradient_batch.append(actor_gradient)
+                #critic_gradient_batch.append(critic_gradient)
 
                 total_reward += np.sum(r_batch)
                 #total_td_loss += np.sum(0.)
@@ -101,22 +101,20 @@ def central_agent(net_params_queues, exp_queues):
             #assert NUM_AGENTS == len(actor_gradient_batch)
             #assert len(actor_gradient_batch) == len(critic_gradient_batch)
 
-            for i in range(len(actor_gradient_batch)):
-                actor.apply_gradients(actor_gradient_batch[i])
-                critic.apply_gradients(critic_gradient_batch[i])
+            # for i in range(len(actor_gradient_batch)):
+            #     actor.apply_gradients(actor_gradient_batch[i])
+            #     critic.apply_gradients(critic_gradient_batch[i])
 
             # offline training
             for p in range(NUM_AGENTS * 10):
                 s_batch, a_batch, r_batch, terminal, m_a_batch = replay.pull()
-                actor_gradient, critic_gradient, td_batch = \
-                    a3c.compute_gradients(
+                td_batch = \
+                    a3c.train_v2(
                         s_batch=np.vstack(s_batch),
                         a_batch=np.vstack(a_batch),
                         r_batch=np.vstack(r_batch),
                         terminal=terminal, actor=actor, critic=critic, mu_a_batch=m_a_batch)
-                actor.apply_gradients(actor_gradient)
-                critic.apply_gradients(critic_gradient)
-
+                
                 total_td_loss += np.sum(td_batch)
                 total_td_batch_len += len(r_batch)
 
